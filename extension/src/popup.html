@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>IDN TikTok Spider</title>
+  <style>
+    body {
+      width: 320px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      color: #333;
+      font-size: 13px;
+    }
+    h3 {
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    button {
+      width: 100%;
+      padding: 8px 12px;
+      background: #0d6efd;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button:disabled {
+      background: #a5c7fc;
+      cursor: not-allowed;
+    }
+    .secondary-btn {
+      background: #6c757d;
+      margin-top: 6px;
+    }
+    hr {
+      border: 0;
+      border-top: 1px solid #eee;
+      margin: 14px 0;
+    }
+    .links {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    a {
+      color: #0d6efd;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    #status {
+      margin-top: 10px;
+      font-size: 12px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      display: none;
+    }
+    .status-success {
+      background: #d1e7dd;
+      color: #0f5132;
+      display: block !important;
+    }
+    .status-error {
+      background: #f8d7da;
+      color: #842029;
+      display: block !important;
+    }
+    .status-info {
+      background: #cff4fc;
+      color: #055160;
+      display: block !important;
+    }
+    .config-section {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <h3>🕷️ IDN TikTok Spider</h3>
+
+  <div>
+    <label for="shop-url" style="display:block; margin-bottom: 4px; font-weight: 500;">监控店铺</label>
+    <input id="shop-url" type="text" placeholder="粘贴 Tokopedia 店铺链接 (如 https://www.tokopedia.com/xyz)" />
+    <button id="add-btn">添加监控</button>
+    <button id="scan-now-btn" class="secondary-btn">立即执行一次扫描</button>
+  </div>
+
+  <div id="status"></div>
+
+  <hr />
+
+  <div class="links">
+    <a id="dashboard-link" href="#" target="_blank">打开 Dashboard →</a>
+    <a id="settings-toggle" href="#" style="font-size: 11px; color: #888;">设置 API</a>
+  </div>
+
+  <div id="settings-panel" style="display: none; margin-top: 10px;">
+    <input id="worker-url-input" type="text" placeholder="Worker URL" />
+    <button id="save-url-btn" style="background:#198754; padding:4px 8px; font-size:11px;">保存 API 节点</button>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

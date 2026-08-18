@@ -1,0 +1,15 @@
+{
+  "name": "idn-tiktok-spider-extension",
+  "version": "0.1.0",
+  "description": "Tokopedia/TikTok Shop 店铺监控众包采集插件",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.4"
+  }
+}
