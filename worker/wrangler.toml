@@ -5,4 +5,4 @@ compatibility_date = "2024-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "idn-tiktok-spider-db"
-database_id = "<your-database-id>"
+database_id = "543f3f08-200b-45ab-a061-2c4e602bf6c3"

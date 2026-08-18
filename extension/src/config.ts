@@ -1,4 +1,4 @@
-export const DEFAULT_WORKER_URL = 'https://idn-tiktok-spider.workers.dev';
+export const DEFAULT_WORKER_URL = 'https://idn-tiktok-spider.toufu8249.workers.dev';
 
 /**
  * 获取当前配置的 Worker API Base URL
