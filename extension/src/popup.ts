@@ -13,6 +13,18 @@ function parseUrls(text: string): string[] {
     .filter((line) => line.length > 0 && !line.startsWith('#'));
 }
 
+async function checkWorkerHealth(workerUrl: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 3500);
+    const res = await fetch(`${workerUrl}/api/health`, { signal: ctrl.signal });
+    clearTimeout(t);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function init() {
   const workerUrl = await getWorkerUrl();
   const textarea = document.getElementById('shop-urls') as HTMLTextAreaElement;
@@ -42,7 +54,7 @@ async function init() {
     if (newUrl) {
       await setWorkerUrl(newUrl);
       if (dashboardLink) dashboardLink.href = `${newUrl}/dashboard`;
-      showStatus('Worker API 节点已更新', 'success');
+      showStatus(`Worker API 节点已更新为:\n${newUrl}`, 'success');
     }
   });
 
@@ -51,6 +63,17 @@ async function init() {
     const urls = parseUrls(textarea.value);
     if (urls.length === 0) {
       showStatus('请在输入框中粘贴至少一条链接（每行一条）', 'error');
+      return;
+    }
+
+    const currentWorkerUrl = await getWorkerUrl();
+    const isHealthy = await checkWorkerHealth(currentWorkerUrl);
+
+    if (!isHealthy) {
+      showStatus(
+        `⚠️ 无法连接到 Worker 后端服务:\n${currentWorkerUrl}\n\n【排查方法】:\n1. 若为本地测试：请在 worker 目录执行 npm run dev 启动后端，并在下方「设置 API」填入 http://localhost:8787\n2. 若为云端部署：请先完成 wrangler deploy 并配置正确的 Worker 域名。`,
+        'error'
+      );
       return;
     }
 
@@ -64,7 +87,7 @@ async function init() {
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       showStatus(
-        `正在批量处理 [${i + 1}/${urls.length}]...\n${url.length > 45 ? url.slice(0, 45) + '...' : url}`,
+        `正在处理 [${i + 1}/${urls.length}]...\n${url.length > 45 ? url.slice(0, 45) + '...' : url}`,
         'info'
       );
 
@@ -91,9 +114,8 @@ async function init() {
         logs.push(`❌ [${i + 1}] 异常: ${err.message}`);
       }
 
-      // Small delay between batch items
       if (i < urls.length - 1) {
-        await new Promise((r) => setTimeout(r, 800));
+        await new Promise((r) => setTimeout(r, 600));
       }
     }
 

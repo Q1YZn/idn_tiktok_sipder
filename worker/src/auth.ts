@@ -22,7 +22,6 @@ export function getUserEmail(req: Request): string | null {
     try {
       const parts = jwt.split('.');
       if (parts.length >= 2) {
-        // atob / base64url decode
         const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
         const jsonPayload = decodeURIComponent(
           atob(base64)
@@ -45,6 +44,16 @@ export function getUserEmail(req: Request): string | null {
   // 3. 开发环境/测试辅助 Header
   const devEmail = req.headers.get('x-user-email');
   if (devEmail) return devEmail;
+
+  // 4. 本地开发模式 (localhost / 127.0.0.1) 兜底默认用户
+  try {
+    const url = new URL(req.url);
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+      return 'dev-admin@local';
+    }
+  } catch {
+    // ignore URL parse errors
+  }
 
   return null;
 }
