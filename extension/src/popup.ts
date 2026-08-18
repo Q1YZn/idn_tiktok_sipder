@@ -2,17 +2,32 @@ import { getWorkerUrl, setWorkerUrl } from './config';
 
 function showStatus(text: string, type: 'success' | 'error' | 'info') {
   const statusEl = document.getElementById('status')!;
-  statusEl.textContent = text;
+  statusEl.innerHTML = text.replace(/\n/g, '<br/>');
   statusEl.className = `status-${type}`;
+}
+
+function parseUrls(text: string): string[] {
+  return text
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
 }
 
 async function init() {
   const workerUrl = await getWorkerUrl();
+  const textarea = document.getElementById('shop-urls') as HTMLTextAreaElement;
   const workerInput = document.getElementById('worker-url-input') as HTMLInputElement;
   const dashboardLink = document.getElementById('dashboard-link') as HTMLAnchorElement;
+  const linkCountEl = document.getElementById('link-count') as HTMLElement;
 
   if (workerInput) workerInput.value = workerUrl;
   if (dashboardLink) dashboardLink.href = `${workerUrl}/dashboard`;
+
+  // Update link count indicator on input
+  textarea?.addEventListener('input', () => {
+    const urls = parseUrls(textarea.value);
+    linkCountEl.textContent = urls.length > 0 ? `已输入 ${urls.length} 条` : '';
+  });
 
   // Settings toggle
   document.getElementById('settings-toggle')?.addEventListener('click', (e) => {
@@ -31,33 +46,75 @@ async function init() {
     }
   });
 
-  // Add shop / scrape link button
+  // Add & batch scrape button
   document.getElementById('add-btn')?.addEventListener('click', async () => {
-    const input = document.getElementById('shop-url') as HTMLInputElement;
-    const url = input.value.trim();
-    if (!url) {
-      showStatus('请输入店铺链接或短链接', 'error');
+    const urls = parseUrls(textarea.value);
+    if (urls.length === 0) {
+      showStatus('请在输入框中粘贴至少一条链接（每行一条）', 'error');
       return;
     }
 
     const btn = document.getElementById('add-btn') as HTMLButtonElement;
     btn.disabled = true;
-    showStatus('正在解析链接并采集数据...', 'info');
 
-    chrome.runtime.sendMessage({ action: 'RESOLVE_AND_SCRAPE', url }, (resp) => {
-      btn.disabled = false;
-      if (chrome.runtime.lastError) {
-        showStatus(`请求失败: ${chrome.runtime.lastError.message}`, 'error');
-      } else if (resp?.ok) {
-        showStatus(resp.result.message, 'success');
-        input.value = '';
-      } else {
-        showStatus(`采集失败: ${resp?.error || '未知错误'}`, 'error');
+    let successCount = 0;
+    let failCount = 0;
+    const logs: string[] = [];
+
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      showStatus(
+        `正在批量处理 [${i + 1}/${urls.length}]...\n${url.length > 45 ? url.slice(0, 45) + '...' : url}`,
+        'info'
+      );
+
+      try {
+        const resp: any = await new Promise((resolve) => {
+          chrome.runtime.sendMessage({ action: 'RESOLVE_AND_SCRAPE', url }, (res) => {
+            if (chrome.runtime.lastError) {
+              resolve({ ok: false, error: chrome.runtime.lastError.message });
+            } else {
+              resolve(res || { ok: false, error: '无响应' });
+            }
+          });
+        });
+
+        if (resp.ok) {
+          successCount++;
+          logs.push(`✅ [${i + 1}] ${resp.result.message}`);
+        } else {
+          failCount++;
+          logs.push(`❌ [${i + 1}] 失败: ${resp.error || '解析错误'}`);
+        }
+      } catch (err: any) {
+        failCount++;
+        logs.push(`❌ [${i + 1}] 异常: ${err.message}`);
       }
-    });
+
+      // Small delay between batch items
+      if (i < urls.length - 1) {
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+
+    btn.disabled = false;
+
+    if (failCount === 0) {
+      textarea.value = '';
+      linkCountEl.textContent = '';
+      showStatus(
+        `🎉 批量采集完成！共处理 ${urls.length} 条，全部成功入库。\n可点击下方打开 Dashboard 查看明细。`,
+        'success'
+      );
+    } else {
+      showStatus(
+        `⚠️ 批量处理结束：成功 ${successCount} 条，失败 ${failCount} 条。\n${logs.join('\n')}`,
+        'info'
+      );
+    }
   });
 
-  // Manual trigger scan
+  // Manual trigger full scan
   document.getElementById('scan-now-btn')?.addEventListener('click', async () => {
     const btn = document.getElementById('scan-now-btn') as HTMLButtonElement;
     btn.disabled = true;
@@ -68,7 +125,7 @@ async function init() {
       if (chrome.runtime.lastError) {
         showStatus(`触发失败: ${chrome.runtime.lastError.message}`, 'error');
       } else if (resp?.ok) {
-        showStatus('扫描任务正在后台执行中，可在 Dashboard 查看进度', 'success');
+        showStatus('全量扫描任务正在后台执行中，可在 Dashboard 查看实时进度', 'success');
       } else {
         showStatus(`扫描返回: ${resp?.message || '无响应'}`, 'info');
       }

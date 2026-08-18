@@ -5,7 +5,7 @@
   <title>IDN TikTok Spider</title>
   <style>
     body {
-      width: 320px;
+      width: 340px;
       padding: 16px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
@@ -20,13 +20,26 @@
       align-items: center;
       gap: 6px;
     }
-    input {
+    textarea {
       width: 100%;
       box-sizing: border-box;
       padding: 8px 10px;
       border: 1px solid #ccc;
       border-radius: 4px;
-      font-size: 13px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      resize: vertical;
+      min-height: 80px;
+      font-family: monospace;
+      line-height: 1.4;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 12px;
       margin-bottom: 8px;
     }
     button {
@@ -69,9 +82,11 @@
     #status {
       margin-top: 10px;
       font-size: 12px;
-      padding: 6px 8px;
+      padding: 8px 10px;
       border-radius: 4px;
       display: none;
+      word-break: break-word;
+      line-height: 1.4;
     }
     .status-success {
       background: #d1e7dd;
@@ -88,10 +103,12 @@
       color: #055160;
       display: block !important;
     }
-    .config-section {
-      margin-top: 10px;
+    .hint {
       font-size: 11px;
-      color: #666;
+      color: #777;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
     }
   </style>
 </head>
@@ -99,10 +116,17 @@
   <h3>🕷️ IDN TikTok Spider</h3>
 
   <div>
-    <label for="shop-url" style="display:block; margin-bottom: 4px; font-weight: 500;">监控店铺</label>
-    <input id="shop-url" type="text" placeholder="粘贴 Tokopedia 店铺链接 (如 https://www.tokopedia.com/xyz)" />
-    <button id="add-btn">添加监控</button>
-    <button id="scan-now-btn" class="secondary-btn">立即执行一次扫描</button>
+    <div class="hint">
+      <span><strong>采集链接（支持多行批量输入）</strong></span>
+      <span id="link-count" style="color: #0d6efd;"></span>
+    </div>
+    <textarea
+      id="shop-urls"
+      rows="4"
+      placeholder="每行粘贴一条链接（支持店铺主页、商品页、vt.tokopedia 短链）：&#10;https://vt.tokopedia.com/t/ZS9kXr...&#10;https://www.tokopedia.com/unilever-official"
+    ></textarea>
+    <button id="add-btn">开始批量采集 / 添加监控</button>
+    <button id="scan-now-btn" class="secondary-btn">对全部已监控店铺执行全量扫描</button>
   </div>
 
   <div id="status"></div>
