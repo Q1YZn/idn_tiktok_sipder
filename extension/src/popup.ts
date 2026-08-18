@@ -31,57 +31,40 @@ async function init() {
     }
   });
 
-  // Add shop button
+  // Add shop / scrape link button
   document.getElementById('add-btn')?.addEventListener('click', async () => {
     const input = document.getElementById('shop-url') as HTMLInputElement;
     const url = input.value.trim();
     if (!url) {
-      showStatus('请输入店铺链接', 'error');
+      showStatus('请输入店铺链接或短链接', 'error');
       return;
     }
 
     const btn = document.getElementById('add-btn') as HTMLButtonElement;
     btn.disabled = true;
-    showStatus('正在添加店铺...', 'info');
+    showStatus('正在解析链接并采集数据...', 'info');
 
-    try {
-      const currentWorkerUrl = await getWorkerUrl();
-      const res = await fetch(`${currentWorkerUrl}/api/v1/shops`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url }),
-      });
-
-      if (res.status === 401) {
-        showStatus('未登录，请先点击下方链接打开 Dashboard 完成 Google 认证', 'error');
-        return;
-      }
-
-      const json = await res.json();
-      if (res.ok && json.ok) {
-        showStatus(`店铺 [${json.shop.shop_name || json.shop.shop_id}] 添加成功！`, 'success');
-        input.value = '';
-        // 通知 background 更新本地缓存或触发扫描
-        chrome.runtime.sendMessage({ action: 'SHOP_ADDED', shop: json.shop });
-      } else {
-        showStatus(`添加失败: ${json.error || '未知错误'}`, 'error');
-      }
-    } catch (err: any) {
-      showStatus(`请求失败: ${err.message}`, 'error');
-    } finally {
+    chrome.runtime.sendMessage({ action: 'RESOLVE_AND_SCRAPE', url }, (resp) => {
       btn.disabled = false;
-    }
+      if (chrome.runtime.lastError) {
+        showStatus(`请求失败: ${chrome.runtime.lastError.message}`, 'error');
+      } else if (resp?.ok) {
+        showStatus(resp.result.message, 'success');
+        input.value = '';
+      } else {
+        showStatus(`采集失败: ${resp?.error || '未知错误'}`, 'error');
+      }
+    });
   });
 
   // Manual trigger scan
   document.getElementById('scan-now-btn')?.addEventListener('click', async () => {
     const btn = document.getElementById('scan-now-btn') as HTMLButtonElement;
     btn.disabled = true;
-    showStatus('已触发后台扫描...', 'info');
+    showStatus('已触发后台全量扫描...', 'info');
 
     chrome.runtime.sendMessage({ action: 'TRIGGER_SCAN' }, (resp) => {
+      btn.disabled = false;
       if (chrome.runtime.lastError) {
         showStatus(`触发失败: ${chrome.runtime.lastError.message}`, 'error');
       } else if (resp?.ok) {
@@ -89,7 +72,6 @@ async function init() {
       } else {
         showStatus(`扫描返回: ${resp?.message || '无响应'}`, 'info');
       }
-      btn.disabled = false;
     });
   });
 }

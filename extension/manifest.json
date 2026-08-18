@@ -10,7 +10,8 @@
     "activeTab"
   ],
   "host_permissions": [
-    "https://www.tokopedia.com/*",
+    "https://*.tokopedia.com/*",
+    "https://*.tiktok.com/*",
     "https://gql.tokopedia.com/*",
     "https://*.workers.dev/*",
     "http://localhost:*/*",
@@ -29,7 +30,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.tokopedia.com/*"],
+      "matches": [
+        "https://*.tokopedia.com/*",
+        "https://*.tiktok.com/*"
+      ],
       "js": ["content-shop.js"],
       "run_at": "document_idle"
     }

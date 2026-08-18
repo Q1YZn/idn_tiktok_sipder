@@ -1,6 +1,7 @@
 import { getWorkerUrl } from './config';
 import { scrapeProduct } from './scraper';
 import { scrapeReviews } from './review-scraper';
+import { classifyUrl } from './resolve';
 import { Shop, ScrapedProduct } from '../../shared/types';
 
 const ALARM_NAME = 'daily-scan';
@@ -21,7 +22,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-// 2. 消息监听（Popup 手动触发或添加店铺）
+// 2. 消息监听（Popup 手动触发或添加链接）
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'TRIGGER_SCAN') {
     runFullScan()
@@ -29,12 +30,142 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, message: err.message }));
     return true;
   }
+
+  if (message.action === 'RESOLVE_AND_SCRAPE') {
+    resolveAndScrapeUrl(message.url)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (message.action === 'SHOP_ADDED') {
     console.log('[Background] 收到新添加店铺通知:', message.shop);
     sendResponse({ ok: true });
     return false;
   }
 });
+
+/**
+ * 解析任意链接（含 vt.tokopedia.com 短链、商品链接、店铺链接）并执行采集
+ */
+async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data?: any; message: string }> {
+  const workerUrl = await getWorkerUrl();
+  console.log('[Background] 正在解析链接:', rawUrl);
+
+  // 1. 打开后台静默 Tab 解析重定向真实 URL
+  let finalUrl = rawUrl;
+  let tabId: number | undefined;
+
+  try {
+    const tab = await chrome.tabs.create({ url: rawUrl, active: false });
+    tabId = tab.id;
+
+    if (tabId) {
+      finalUrl = await waitForTabRedirect(tabId);
+    }
+  } catch (err) {
+    console.warn('[Background] 重定向等待失败，使用原 URL:', err);
+  } finally {
+    if (tabId) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch {
+        // tab may already be closed
+      }
+    }
+  }
+
+  console.log('[Background] 链接解析为最终真实 URL:', finalUrl);
+  const info = classifyUrl(finalUrl);
+
+  // 2. 如果是店铺链接，加入监控并扫描整店
+  if (info.type === 'shop') {
+    const res = await fetch(`${workerUrl}/api/v1/shops`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: finalUrl }),
+    });
+    const shopJson = await res.json();
+    if (shopJson.shop) {
+      // 异步执行该店铺扫描
+      scanShop(shopJson.shop, workerUrl).catch(console.error);
+    }
+    return {
+      type: 'shop',
+      data: shopJson.shop,
+      message: `已识别为店铺 [${shopJson.shop?.shop_name || info.shopSlug}]，已加入监控并在后台开始整店全量爬取！`,
+    };
+  }
+
+  // 3. 如果是商品链接（包括 PDP / shop-id / vt 短链解析出的单个商品）
+  try {
+    const product: ScrapedProduct = await scrapeProduct(finalUrl);
+
+    // 上报商品
+    await fetch(`${workerUrl}/api/v1/products/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(product),
+    });
+
+    // 抓取并上报评论
+    if (product.productID) {
+      try {
+        const { reviews } = await scrapeReviews(product.productID, { limit: 10, maxPages: 2 });
+        if (reviews.length > 0) {
+          await fetch(
+            `${workerUrl}/api/v1/products/${encodeURIComponent(product.productID)}/reviews/submit`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reviews }),
+            }
+          );
+        }
+      } catch (revErr) {
+        console.warn('[Background] 评论抓取异常:', revErr);
+      }
+    }
+
+    return {
+      type: 'product',
+      data: product,
+      message: `商品 [${product.name || product.productID}] 采集成功！已录入价格、销量、SKU 及评论。`,
+    };
+  } catch (err: any) {
+    throw new Error(`商品数据提取失败: ${err.message}`);
+  }
+}
+
+/**
+ * 等待 Tab 完成 302 重定向并获取最终 URL
+ */
+function waitForTabRedirect(tabId: number): Promise<string> {
+  return new Promise((resolve) => {
+    let resolved = false;
+
+    const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        if (!resolved && tab.url && !tab.url.startsWith('chrome://')) {
+          resolved = true;
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve(tab.url);
+        }
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+
+    // 15 秒超时兜底
+    setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        chrome.tabs.get(tabId, (t) => resolve(t?.url || ''));
+      }
+    }, 15000);
+  });
+}
 
 /**
  * 执行所有店铺全量扫描
@@ -78,7 +209,6 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
   const shopUrl = shop.url || `https://www.tokopedia.com/${shop.shop_id}`;
   console.log(`[Background] 正在扫描店铺: ${shop.shop_name || shop.shop_id} (${shopUrl})`);
 
-  // 1. 打开后台静默 Tab 提取商品链接
   let tabId: number | undefined;
   let productLinks: string[] = [];
 
@@ -120,12 +250,10 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
     console.log(`[Background] [${i + 1}/${productLinks.length}] 正在采集商品: ${purl}`);
 
     try {
-      // 2.1 抓取商品基本信息与快照
       const product: ScrapedProduct = await scrapeProduct(purl);
       product.shopID = shop.shop_id;
       product.shopName = shop.shop_name || shop.shop_id;
 
-      // 2.2 上报商品与快照
       const prodRes = await fetch(`${workerUrl}/api/v1/products/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -136,7 +264,6 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
         console.warn(`[Background] 上报商品失败 HTTP ${prodRes.status}: ${purl}`);
       }
 
-      // 2.3 抓取评论并上报
       if (product.productID) {
         try {
           const { reviews } = await scrapeReviews(product.productID, { limit: 10, maxPages: 2 });
@@ -159,7 +286,6 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
       console.error(`[Background] 抓取商品失败 [${purl}]:`, prodErr);
     }
 
-    // 礼貌等待 1-2 秒，防止过频
     await sleep(1000 + Math.random() * 1000);
   }
 }
@@ -169,12 +295,10 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
  */
 function extractLinksFromTab(tabId: number): Promise<string[]> {
   return new Promise((resolve) => {
-    // 监听 Tab 加载完成
     const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (updatedTabId === tabId && changeInfo.status === 'complete') {
         chrome.tabs.onUpdated.removeListener(listener);
 
-        // 延迟等待页面渲染完成后发送提取消息
         setTimeout(() => {
           chrome.tabs.sendMessage(
             tabId,
@@ -195,7 +319,6 @@ function extractLinksFromTab(tabId: number): Promise<string[]> {
 
     chrome.tabs.onUpdated.addListener(listener);
 
-    // 设置 35 秒超时兜底
     setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
       resolve([]);
