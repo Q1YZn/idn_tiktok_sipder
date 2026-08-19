@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import { AppContext } from '../auth';
 import {
-  listShops,
-  getShop,
-  upsertShop,
-  deleteShop,
-  getShopProducts,
-  updateShopLastScan,
+ listShops,
+ getShop,
+ upsertShop,
+ deleteShop,
+ getShopProducts,
+ updateShopLastScan,
 } from '../db';
 
 export const shopRoutes = new Hono<AppContext>();
@@ -16,9 +16,9 @@ export const shopRoutes = new Hono<AppContext>();
  * GET /api/v1/shops
  */
 shopRoutes.get('/', async (c) => {
-  const userId = c.get('userEmail');
-  const shops = await listShops(c.env.DB, userId);
-  return c.json({ shops });
+ const userId = c.get('userEmail');
+ const shops = await listShops(c.env.DB, userId);
+ return c.json({ shops });
 });
 
 /**
@@ -27,42 +27,42 @@ shopRoutes.get('/', async (c) => {
  * Body: { url: string } or { shop_id: string, shop_name?: string, url?: string }
  */
 shopRoutes.post('/', async (c) => {
-  const userId = c.get('userEmail');
-  const body = await c.req.json().catch(() => ({}));
-  const { url, shop_id, shop_name, active_products } = body;
+ const userId = c.get('userEmail');
+ const body = await c.req.json().catch(() => ({}));
+ const { url, shop_id, shop_name, active_products } = body;
 
-  let shopId = shop_id;
-  let shopName = shop_name;
-  let domain = 'tokopedia.com';
+ let shopId = shop_id;
+ let shopName = shop_name;
+ let domain = 'tokopedia.com';
 
-  if (!shopId && url) {
-    try {
-      const parsedUrl = new URL(url);
-      domain = parsedUrl.hostname;
-      const segments = parsedUrl.pathname.replace(/\/+$/, '').split('/').filter(Boolean);
-      if (segments.length > 0) {
-        shopId = segments[0];
-        shopName = shopName || segments[0];
-      }
-    } catch {
-      return c.json({ error: '无效的 URL' }, 400);
-    }
-  }
+ if (!shopId && url) {
+ try {
+ const parsedUrl = new URL(url);
+ domain = parsedUrl.hostname;
+ const segments = parsedUrl.pathname.replace(/\/+$/, '').split('/').filter(Boolean);
+ if (segments.length > 0) {
+ shopId = segments[0];
+ shopName = shopName || segments[0];
+ }
+ } catch {
+ return c.json({ error: '无效的 URL' }, 400);
+ }
+ }
 
-  if (!shopId) {
-    return c.json({ error: '缺少店铺 ID 或 URL' }, 400);
-  }
+ if (!shopId) {
+ return c.json({ error: '缺少店铺 ID 或 URL' }, 400);
+ }
 
-  await upsertShop(c.env.DB, userId, {
-    shopID: shopId,
-    shopName: shopName || shopId,
-    domain,
-    url: url || null,
-    activeProducts: active_products ?? null,
-  });
+ await upsertShop(c.env.DB, userId, {
+ shopID: shopId,
+ shopName: shopName || shopId,
+ domain,
+ url: url || null,
+ activeProducts: active_products ?? null,
+ });
 
-  const shop = await getShop(c.env.DB, userId, shopId);
-  return c.json({ ok: true, shop });
+ const shop = await getShop(c.env.DB, userId, shopId);
+ return c.json({ ok: true, shop });
 });
 
 /**
@@ -70,11 +70,11 @@ shopRoutes.post('/', async (c) => {
  * GET /api/v1/shops/:id
  */
 shopRoutes.get('/:id', async (c) => {
-  const userId = c.get('userEmail');
-  const shopId = c.req.param('id');
-  const shop = await getShop(c.env.DB, userId, shopId);
-  if (!shop) return c.json({ error: '店铺不存在' }, 404);
-  return c.json({ shop });
+ const userId = c.get('userEmail');
+ const shopId = c.req.param('id');
+ const shop = await getShop(c.env.DB, userId, shopId);
+ if (!shop) return c.json({ error: '店铺不存在' }, 404);
+ return c.json({ shop });
 });
 
 /**
@@ -82,13 +82,13 @@ shopRoutes.get('/:id', async (c) => {
  * GET /api/v1/shops/:id/products
  */
 shopRoutes.get('/:id/products', async (c) => {
-  const userId = c.get('userEmail');
-  const shopId = c.req.param('id');
-  const shop = await getShop(c.env.DB, userId, shopId);
-  if (!shop) return c.json({ error: '店铺不存在' }, 404);
+ const userId = c.get('userEmail');
+ const shopId = c.req.param('id');
+ const shop = await getShop(c.env.DB, userId, shopId);
+ if (!shop) return c.json({ error: '店铺不存在' }, 404);
 
-  const products = await getShopProducts(c.env.DB, userId, shopId);
-  return c.json({ shop, products });
+ const products = await getShopProducts(c.env.DB, userId, shopId);
+ return c.json({ shop, products });
 });
 
 /**
@@ -96,10 +96,10 @@ shopRoutes.get('/:id/products', async (c) => {
  * DELETE /api/v1/shops/:id
  */
 shopRoutes.delete('/:id', async (c) => {
-  const userId = c.get('userEmail');
-  const shopId = c.req.param('id');
-  await deleteShop(c.env.DB, userId, shopId);
-  return c.json({ ok: true, deleted: shopId });
+ const userId = c.get('userEmail');
+ const shopId = c.req.param('id');
+ await deleteShop(c.env.DB, userId, shopId);
+ return c.json({ ok: true, deleted: shopId });
 });
 
 /**
@@ -107,25 +107,47 @@ shopRoutes.delete('/:id', async (c) => {
  * POST /api/v1/shops/:id/scan
  */
 shopRoutes.post('/:id/scan', async (c) => {
-  const userId = c.get('userEmail');
-  const shopId = c.req.param('id');
-  const body = await c.req.json().catch(() => ({}));
-  const { total_products } = body;
+ const userId = c.get('userEmail');
+ const shopId = c.req.param('id');
+ const body = await c.req.json().catch(() => ({}));
+ const { total_products } = body;
 
-  await updateShopLastScan(c.env.DB, userId, shopId);
+ await updateShopLastScan(c.env.DB, userId, shopId);
 
-  if (typeof total_products === 'number') {
-    const existing = await getShop(c.env.DB, userId, shopId);
-    if (existing) {
-      await upsertShop(c.env.DB, userId, {
-        shopID: shopId,
-        shopName: existing.shop_name,
-        domain: existing.domain,
-        url: existing.url,
-        activeProducts: total_products,
-      });
-    }
-  }
+ if (typeof total_products === 'number') {
+ const existing = await getShop(c.env.DB, userId, shopId);
+ if (existing) {
+ await upsertShop(c.env.DB, userId, {
+ shopID: shopId,
+ shopName: existing.shop_name,
+ domain: existing.domain,
+ url: existing.url,
+ activeProducts: total_products,
+ });
+ }
+ }
 
-  return c.json({ ok: true, shop_id: shopId, scanned_at: new Date().toISOString() });
+ return c.json({ ok: true, shop_id: shopId, scanned_at: new Date().toISOString() });
+});
+
+/**
+ * 重新扫描全店（重置 active_products 并更新时间戳）
+ * POST /api/v1/shops/:id/rescan
+ */
+shopRoutes.post('/:id/rescan', async (c) => {
+ const userId = c.get('userEmail');
+ const shopId = c.req.param('id');
+ const shop = await getShop(c.env.DB, userId, shopId);
+ if (!shop) return c.json({ error: '店铺不存在' }, 404);
+
+ await upsertShop(c.env.DB, userId, {
+ shopID: shopId,
+ shopName: shop.shop_name,
+ domain: shop.domain,
+ url: shop.url,
+ activeProducts: null,
+ });
+ await updateShopLastScan(c.env.DB, userId, shopId);
+
+ return c.json({ ok: true, message: '全店重新扫描任务已触发', shop_id: shopId });
 });

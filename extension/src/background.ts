@@ -32,7 +32,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.action === 'RESOLVE_AND_SCRAPE') {
-    resolveAndScrapeUrl(message.url)
+    resolveAndScrapeShopFromUrl(message.url)
       .then((result) => sendResponse({ ok: true, result }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -45,20 +45,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 /**
- * 解析任意链接（含短链、单商品、店铺主页）并执行采集
+ * 核心：以店铺为单位进行监控与全量采集（支持输入商品链接/短链接自动反查所属店铺）
  */
-async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data?: any; message: string }> {
+async function resolveAndScrapeShopFromUrl(rawUrl: string): Promise<{ type: string; data?: any; message: string }> {
   const workerUrl = await getWorkerUrl();
-  console.log('[Background] 正在解析链接:', rawUrl);
+  console.log('[Background] 正在解析链接并获取所属店铺:', rawUrl);
 
   const initialInfo = classifyUrl(rawUrl);
 
-  // 1. 如果输入的是明确的店铺链接（如 tokopedia.com/squish-c）
+  // 1. 如果直接是店铺链接（如 tokopedia.com/squish-c）
   if (initialInfo.type === 'shop') {
     const shopSlug = initialInfo.shopSlug!;
     const shopUrl = `https://www.tokopedia.com/${shopSlug}/product`;
 
-    // 1.1 先向 Worker 添加店铺记录
     const res = await fetch(`${workerUrl}/api/v1/shops`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -67,17 +66,16 @@ async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data
     const shopJson = await res.json();
     const shop = shopJson.shop || { shop_id: shopSlug, shop_name: shopSlug, url: shopUrl };
 
-    // 1.2 立即触发该店铺全量商品抓取
     const productCount = await scanShop(shop, workerUrl);
 
     return {
       type: 'shop',
       data: shop,
-      message: `店铺 [${shop.shop_name || shopSlug}] 添加成功！已扫描全店并成功采集入库 ${productCount} 个商品及评论。`,
+      message: `✅ 店铺 [${shop.shop_name || shopSlug}] 已加入监控，已扫描全店并成功入库 ${productCount} 个商品及评论！`,
     };
   }
 
-  // 2. 如果是短链接，通过 Tab 获取 302 重定向后的真实目标 URL
+  // 2. 如果是短链或商品链接，先通过 Tab 获取真实 URL
   let finalUrl = rawUrl;
   let tabId: number | undefined;
 
@@ -95,10 +93,9 @@ async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data
     }
   }
 
-  console.log('[Background] 链接最终真实 URL:', finalUrl);
+  console.log('[Background] 链接解析真实目标 URL:', finalUrl);
   const info = classifyUrl(finalUrl);
 
-  // 3. 重定向后为店铺
   if (info.type === 'shop') {
     const shopSlug = info.shopSlug!;
     const res = await fetch(`${workerUrl}/api/v1/shops`, {
@@ -113,22 +110,22 @@ async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data
     return {
       type: 'shop',
       data: shop,
-      message: `店铺 [${shopSlug}] 已加入监控并抓取到 ${productCount} 个商品！`,
+      message: `✅ 店铺 [${shopSlug}] 已加入监控并抓取到 ${productCount} 个商品！`,
     };
   }
 
-  // 4. 重定向后为单个商品
+  // 3. 从商品中反查所属店铺，并执行全店采集与监控！
   try {
     const product: ScrapedProduct = await scrapeProduct(finalUrl);
 
-    // 上报商品与快照
+    // 上报该单商品
     await fetch(`${workerUrl}/api/v1/products/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(product),
     });
 
-    // 抓取并上报评论
+    // 抓取该商品评论
     if (product.productID) {
       try {
         const { reviews } = await scrapeReviews(product.productID, { limit: 10, maxPages: 2 });
@@ -147,13 +144,52 @@ async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data
       }
     }
 
+    // 关键：识别该商品所属的店铺 ID / 商家 slug，并加入全店监控
+    let targetShopSlug = product.shopID || product.shopName;
+
+    // 若未解析出，从 URL 中提取店铺段（如 tokopedia.com/squish-c/product-123 -> squish-c）
+    if (!targetShopSlug) {
+      try {
+        const u = new URL(finalUrl);
+        const segs = u.pathname.split('/').filter(Boolean);
+        if (segs.length >= 2 && segs[0] !== 'view' && segs[0] !== 'pdp') {
+          targetShopSlug = segs[0];
+        }
+      } catch {}
+    }
+
+    let shopProductCount = 1;
+    if (targetShopSlug) {
+      console.log(`[Background] 成功从商品反查到所属店铺: ${targetShopSlug}，启动整店全量扫描...`);
+      const shopRes = await fetch(`${workerUrl}/api/v1/shops`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: `https://www.tokopedia.com/${targetShopSlug}`,
+          shop_id: targetShopSlug,
+          shop_name: product.shopName || targetShopSlug,
+        }),
+      });
+      const shopJson = await shopRes.json();
+      const shop = shopJson.shop || { shop_id: targetShopSlug, shop_name: product.shopName || targetShopSlug };
+
+      // 扫描该店铺全量商品
+      shopProductCount = await scanShop(shop, workerUrl);
+
+      return {
+        type: 'shop',
+        data: shop,
+        message: `🎯 成功从商品反查出所属店铺 [${shop.shop_name || targetShopSlug}]！已添加整店监控并抓取该店全部 ${shopProductCount} 个商品！`,
+      };
+    }
+
     return {
       type: 'product',
       data: product,
-      message: `商品 [${product.name || product.productID}] 采集成功！已入库规格与评论。`,
+      message: `商品 [${product.name || product.productID}] 采集成功！已入库。`,
     };
   } catch (err: any) {
-    throw new Error(`商品数据提取失败: ${err.message}`);
+    throw new Error(`商品与所属店铺解析失败: ${err.message}`);
   }
 }
 
@@ -229,7 +265,6 @@ async function runFullScan(): Promise<{ scannedShops: number; scannedProducts: n
  */
 async function scanShop(shop: Shop, workerUrl: string): Promise<number> {
   const shopSlug = shop.shop_id;
-  // 直接访问该店铺的商品列表页 /product，确保直接加载商品列表
   const shopUrl = shop.url?.includes('/product') ? shop.url : `https://www.tokopedia.com/${shopSlug}/product`;
   console.log(`[Background] 正在扫描店铺: ${shop.shop_name || shopSlug} (${shopUrl})`);
 
@@ -237,7 +272,6 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<number> {
   let productLinks: string[] = [];
 
   try {
-    // 创建前台或后台静默 tab
     const tab = await chrome.tabs.create({ url: shopUrl, active: false });
     tabId = tab.id;
 
@@ -314,7 +348,6 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<number> {
  * 在 Tab 内部执行直接 DOM 提取
  */
 async function extractShopLinksUsingScripting(tabId: number, shopSlug: string): Promise<string[]> {
-  // 等待 Tab 加载完成
   await new Promise<void>((resolve) => {
     const listener = (tid: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (tid === tabId && changeInfo.status === 'complete') {
@@ -329,14 +362,12 @@ async function extractShopLinksUsingScripting(tabId: number, shopSlug: string): 
     }, 15000);
   });
 
-  // 延时 2 秒等待 React/Vue 水合渲染
   await sleep(2000);
 
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: async (slug: string) => {
-        // 尝试点击 "Produk" tab
         const tabEls = Array.from(document.querySelectorAll<HTMLElement>('a, button, [role="tab"], div[data-testid*="tab"]'));
         const pTab = tabEls.find((el) => {
           const t = (el.innerText || el.textContent || '').trim().toLowerCase();
@@ -357,7 +388,6 @@ async function extractShopLinksUsingScripting(tabId: number, shopSlug: string): 
           'div[class*="card"] a'
         ];
 
-        // 模拟滚动加载
         for (let i = 0; i < 15; i++) {
           window.scrollBy(0, 1200);
           await new Promise((r) => setTimeout(r, 600));
@@ -371,7 +401,6 @@ async function extractShopLinksUsingScripting(tabId: number, shopSlug: string): 
           }
         }
 
-        // 过滤非商品链接
         return Array.from(productMap).filter((href) => {
           try {
             const u = new URL(href);
