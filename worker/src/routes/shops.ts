@@ -24,12 +24,11 @@ shopRoutes.get('/', async (c) => {
 /**
  * 添加/更新监控店铺
  * POST /api/v1/shops
- * Body: { url: string } or { shop_id: string, shop_name?: string, url?: string }
  */
 shopRoutes.post('/', async (c) => {
  const userId = c.get('userEmail');
  const body = await c.req.json().catch(() => ({}));
- const { url, shop_id, shop_name, active_products } = body;
+ const { url, shop_id, shop_name, active_products, scan_interval_hours } = body;
 
  let shopId = shop_id;
  let shopName = shop_name;
@@ -59,6 +58,7 @@ shopRoutes.post('/', async (c) => {
  domain,
  url: url || null,
  activeProducts: active_products ?? null,
+ scanIntervalHours: scan_interval_hours ?? 24,
  });
 
  const shop = await getShop(c.env.DB, userId, shopId);
@@ -123,6 +123,7 @@ shopRoutes.post('/:id/scan', async (c) => {
  domain: existing.domain,
  url: existing.url,
  activeProducts: total_products,
+ scanIntervalHours: existing.scan_interval_hours,
  });
  }
  }
@@ -131,7 +132,7 @@ shopRoutes.post('/:id/scan', async (c) => {
 });
 
 /**
- * 重新扫描全店（重置 active_products 并更新时间戳）
+ * 重新扫描全店
  * POST /api/v1/shops/:id/rescan
  */
 shopRoutes.post('/:id/rescan', async (c) => {
@@ -146,8 +147,70 @@ shopRoutes.post('/:id/rescan', async (c) => {
  domain: shop.domain,
  url: shop.url,
  activeProducts: null,
+ scanIntervalHours: shop.scan_interval_hours,
  });
  await updateShopLastScan(c.env.DB, userId, shopId);
 
  return c.json({ ok: true, message: '全店重新扫描任务已触发', shop_id: shopId });
+});
+
+/**
+ * 更新店铺配置
+ * PATCH /api/v1/shops/:id/config
+ */
+shopRoutes.patch('/:id/config', async (c) => {
+ const userId = c.get('userEmail');
+ const shopId = c.req.param('id');
+ const shop = await getShop(c.env.DB, userId, shopId);
+ if (!shop) return c.json({ error: '店铺不存在' }, 404);
+
+ const body = await c.req.json().catch(() => ({}));
+ const { scan_interval_hours, enabled } = body;
+
+ await upsertShop(c.env.DB, userId, {
+ shopID: shopId,
+ shopName: shop.shop_name,
+ domain: shop.domain,
+ url: shop.url,
+ activeProducts: shop.active_products,
+ scanIntervalHours: typeof scan_interval_hours === 'number' ? scan_interval_hours : shop.scan_interval_hours,
+ });
+
+ const updated = await getShop(c.env.DB, userId, shopId);
+ return c.json({ ok: true, shop: updated });
+});
+
+/**
+ * 云端任务调度：返回当前用户需要扫描的店铺列表
+ * GET /api/v1/tasks/pull
+ * Query: ?token=<上次拉取时间戳>
+ */
+shopRoutes.get('/tasks/pull', async (c) => {
+ const userId = c.get('userEmail');
+ const since = c.req.query('since') || '1970-01-01T00:00:00Z';
+
+ const { results: shops } = await c.env.DB.prepare(
+ `SELECT * FROM shops WHERE user_id = ? AND (last_scan_at IS NULL OR last_scan_at < ?) ORDER BY created_at DESC`
+ ).bind(userId, since).all<any>();
+
+ // 为每个店铺计算下次扫描时间
+ const now = new Date().toISOString();
+ const tasks = shops.map((shop: any) => {
+ const lastScan = shop.last_scan_at ? new Date(shop.last_scan_at) : null;
+ const intervalMs = (shop.scan_interval_hours || 24) * 3600 * 1000;
+ const nextScan = lastScan ? new Date(lastScan.getTime() + intervalMs) : new Date(0);
+ const due = new Date(now) >= nextScan;
+
+ return {
+ shop_id: shop.shop_id,
+ shop_name: shop.shop_name,
+ url: shop.url,
+ scan_interval_hours: shop.scan_interval_hours || 24,
+ last_scan_at: shop.last_scan_at,
+ next_scan_at: nextScan.toISOString(),
+ due,
+ };
+ });
+
+ return c.json({ tasks, now });
 });
