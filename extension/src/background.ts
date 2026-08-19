@@ -11,7 +11,7 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('[Background] 插件已安装，初始化定时任务...');
   chrome.alarms.create(ALARM_NAME, {
     delayInMinutes: 1,
-    periodInMinutes: 1440, // 每天一次
+    periodInMinutes: 1440,
   });
 });
 
@@ -26,7 +26,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'TRIGGER_SCAN') {
     runFullScan()
-      .then(() => sendResponse({ ok: true, message: '扫描已开始' }))
+      .then((res) => sendResponse({ ok: true, message: `全量扫描完成，共扫描 ${res.scannedShops} 个店铺，采集 ${res.scannedProducts} 个商品！` }))
       .catch((err) => sendResponse({ ok: false, message: err.message }));
     return true;
   }
@@ -39,69 +39,89 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.action === 'SHOP_ADDED') {
-    console.log('[Background] 收到新添加店铺通知:', message.shop);
     sendResponse({ ok: true });
     return false;
   }
 });
 
 /**
- * 解析任意链接（含 vt.tokopedia.com 短链、商品链接、店铺链接）并执行采集
+ * 解析任意链接（含短链、单商品、店铺主页）并执行采集
  */
 async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data?: any; message: string }> {
   const workerUrl = await getWorkerUrl();
   console.log('[Background] 正在解析链接:', rawUrl);
 
-  // 1. 打开后台静默 Tab 解析重定向真实 URL
+  const initialInfo = classifyUrl(rawUrl);
+
+  // 1. 如果输入的是明确的店铺链接（如 tokopedia.com/squish-c）
+  if (initialInfo.type === 'shop') {
+    const shopSlug = initialInfo.shopSlug!;
+    const shopUrl = `https://www.tokopedia.com/${shopSlug}/product`;
+
+    // 1.1 先向 Worker 添加店铺记录
+    const res = await fetch(`${workerUrl}/api/v1/shops`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: rawUrl, shop_id: shopSlug, shop_name: shopSlug }),
+    });
+    const shopJson = await res.json();
+    const shop = shopJson.shop || { shop_id: shopSlug, shop_name: shopSlug, url: shopUrl };
+
+    // 1.2 立即触发该店铺全量商品抓取
+    const productCount = await scanShop(shop, workerUrl);
+
+    return {
+      type: 'shop',
+      data: shop,
+      message: `店铺 [${shop.shop_name || shopSlug}] 添加成功！已扫描全店并成功采集入库 ${productCount} 个商品及评论。`,
+    };
+  }
+
+  // 2. 如果是短链接，通过 Tab 获取 302 重定向后的真实目标 URL
   let finalUrl = rawUrl;
   let tabId: number | undefined;
 
   try {
     const tab = await chrome.tabs.create({ url: rawUrl, active: false });
     tabId = tab.id;
-
     if (tabId) {
       finalUrl = await waitForTabRedirect(tabId);
     }
   } catch (err) {
-    console.warn('[Background] 重定向等待失败，使用原 URL:', err);
+    console.warn('[Background] 重定向等待失败:', err);
   } finally {
     if (tabId) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch {
-        // tab may already be closed
-      }
+      try { await chrome.tabs.remove(tabId); } catch {}
     }
   }
 
-  console.log('[Background] 链接解析为最终真实 URL:', finalUrl);
+  console.log('[Background] 链接最终真实 URL:', finalUrl);
   const info = classifyUrl(finalUrl);
 
-  // 2. 如果是店铺链接，加入监控并扫描整店
+  // 3. 重定向后为店铺
   if (info.type === 'shop') {
+    const shopSlug = info.shopSlug!;
     const res = await fetch(`${workerUrl}/api/v1/shops`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: finalUrl }),
+      body: JSON.stringify({ url: finalUrl, shop_id: shopSlug, shop_name: shopSlug }),
     });
     const shopJson = await res.json();
-    if (shopJson.shop) {
-      // 异步执行该店铺扫描
-      scanShop(shopJson.shop, workerUrl).catch(console.error);
-    }
+    const shop = shopJson.shop || { shop_id: shopSlug, shop_name: shopSlug, url: finalUrl };
+    const productCount = await scanShop(shop, workerUrl);
+
     return {
       type: 'shop',
-      data: shopJson.shop,
-      message: `已识别为店铺 [${shopJson.shop?.shop_name || info.shopSlug}]，已加入监控并在后台开始整店全量爬取！`,
+      data: shop,
+      message: `店铺 [${shopSlug}] 已加入监控并抓取到 ${productCount} 个商品！`,
     };
   }
 
-  // 3. 如果是商品链接（包括 PDP / shop-id / vt 短链解析出的单个商品）
+  // 4. 重定向后为单个商品
   try {
     const product: ScrapedProduct = await scrapeProduct(finalUrl);
 
-    // 上报商品
+    // 上报商品与快照
     await fetch(`${workerUrl}/api/v1/products/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -123,14 +143,14 @@ async function resolveAndScrapeUrl(rawUrl: string): Promise<{ type: string; data
           );
         }
       } catch (revErr) {
-        console.warn('[Background] 评论抓取异常:', revErr);
+        console.warn('[Background] 抓取评论异常:', revErr);
       }
     }
 
     return {
       type: 'product',
       data: product,
-      message: `商品 [${product.name || product.productID}] 采集成功！已录入价格、销量、SKU 及评论。`,
+      message: `商品 [${product.name || product.productID}] 采集成功！已入库规格与评论。`,
     };
   } catch (err: any) {
     throw new Error(`商品数据提取失败: ${err.message}`);
@@ -156,7 +176,6 @@ function waitForTabRedirect(tabId: number): Promise<string> {
 
     chrome.tabs.onUpdated.addListener(listener);
 
-    // 15 秒超时兜底
     setTimeout(() => {
       if (!resolved) {
         resolved = true;
@@ -170,7 +189,7 @@ function waitForTabRedirect(tabId: number): Promise<string> {
 /**
  * 执行所有店铺全量扫描
  */
-async function runFullScan(): Promise<void> {
+async function runFullScan(): Promise<{ scannedShops: number; scannedProducts: number }> {
   const workerUrl = await getWorkerUrl();
 
   let shops: Shop[] = [];
@@ -178,64 +197,66 @@ async function runFullScan(): Promise<void> {
     const res = await fetch(`${workerUrl}/api/v1/shops`);
     if (!res.ok) {
       console.error('[Background] 获取店铺列表失败, HTTP status:', res.status);
-      return;
+      return { scannedShops: 0, scannedProducts: 0 };
     }
     const data = await res.json();
     shops = data.shops || [];
   } catch (e) {
     console.error('[Background] 请求 Worker 店铺列表异常:', e);
-    return;
+    return { scannedShops: 0, scannedProducts: 0 };
   }
 
-  console.log(`[Background] 开始扫描当前用户的 ${shops.length} 个店铺...`);
+  console.log(`[Background] 开始全量扫描当前用户的 ${shops.length} 个店铺...`);
+  let totalProducts = 0;
 
   for (const shop of shops) {
     try {
-      await scanShop(shop, workerUrl);
+      const count = await scanShop(shop, workerUrl);
+      totalProducts += count;
     } catch (err) {
       console.error(`[Background] 扫描店铺 [${shop.shop_name || shop.shop_id}] 出错:`, err);
     }
-    // 店铺间休息 3 秒
-    await sleep(3000);
+    await sleep(2000);
   }
 
-  console.log('[Background] 本轮所有店铺扫描结束。');
+  console.log(`[Background] 本轮全量扫描完成，共扫描 ${shops.length} 个店铺，${totalProducts} 个商品。`);
+  return { scannedShops: shops.length, scannedProducts: totalProducts };
 }
 
 /**
- * 扫描单个店铺
+ * 扫描单个店铺并采集商品列表
+ * @returns 抓取到的商品总数
  */
-async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
-  const shopUrl = shop.url || `https://www.tokopedia.com/${shop.shop_id}`;
-  console.log(`[Background] 正在扫描店铺: ${shop.shop_name || shop.shop_id} (${shopUrl})`);
+async function scanShop(shop: Shop, workerUrl: string): Promise<number> {
+  const shopSlug = shop.shop_id;
+  // 直接访问该店铺的商品列表页 /product，确保直接加载商品列表
+  const shopUrl = shop.url?.includes('/product') ? shop.url : `https://www.tokopedia.com/${shopSlug}/product`;
+  console.log(`[Background] 正在扫描店铺: ${shop.shop_name || shopSlug} (${shopUrl})`);
 
   let tabId: number | undefined;
   let productLinks: string[] = [];
 
   try {
+    // 创建前台或后台静默 tab
     const tab = await chrome.tabs.create({ url: shopUrl, active: false });
     tabId = tab.id;
 
     if (tabId) {
-      productLinks = await extractLinksFromTab(tabId);
+      productLinks = await extractShopLinksUsingScripting(tabId, shopSlug);
     }
   } catch (err) {
     console.error('[Background] 提取店铺商品链接失败:', err);
   } finally {
     if (tabId) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch {
-        // tab may already be closed
-      }
+      try { await chrome.tabs.remove(tabId); } catch {}
     }
   }
 
-  console.log(`[Background] 店铺 [${shop.shop_id}] 提取到 ${productLinks.length} 个商品链接`);
+  console.log(`[Background] 店铺 [${shopSlug}] 成功提取到 ${productLinks.length} 个商品链接`);
 
   // 上报店铺扫描状态
   try {
-    await fetch(`${workerUrl}/api/v1/shops/${encodeURIComponent(shop.shop_id)}/scan`, {
+    await fetch(`${workerUrl}/api/v1/shops/${encodeURIComponent(shopSlug)}/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ total_products: productLinks.length }),
@@ -244,25 +265,23 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
     console.error('[Background] 上报店铺扫描状态失败:', e);
   }
 
-  // 2. 逐个商品采集详情与评论并上报
+  // 逐个商品采集
+  let scrapedCount = 0;
   for (let i = 0; i < productLinks.length; i++) {
     const purl = productLinks[i];
     console.log(`[Background] [${i + 1}/${productLinks.length}] 正在采集商品: ${purl}`);
 
     try {
       const product: ScrapedProduct = await scrapeProduct(purl);
-      product.shopID = shop.shop_id;
-      product.shopName = shop.shop_name || shop.shop_id;
+      product.shopID = shopSlug;
+      product.shopName = shop.shop_name || shopSlug;
 
-      const prodRes = await fetch(`${workerUrl}/api/v1/products/submit`, {
+      await fetch(`${workerUrl}/api/v1/products/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(product),
       });
-
-      if (!prodRes.ok) {
-        console.warn(`[Background] 上报商品失败 HTTP ${prodRes.status}: ${purl}`);
-      }
+      scrapedCount++;
 
       if (product.productID) {
         try {
@@ -276,7 +295,6 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
                 body: JSON.stringify({ reviews }),
               }
             );
-            console.log(`[Background] 商品 [${product.productID}] 上报 ${reviews.length} 条评论`);
           }
         } catch (revErr) {
           console.warn(`[Background] 抓取评论失败 [${product.productID}]:`, revErr);
@@ -286,44 +304,94 @@ async function scanShop(shop: Shop, workerUrl: string): Promise<void> {
       console.error(`[Background] 抓取商品失败 [${purl}]:`, prodErr);
     }
 
-    await sleep(1000 + Math.random() * 1000);
+    await sleep(800 + Math.random() * 800);
   }
+
+  return scrapedCount;
 }
 
 /**
- * 等待 Tab 加载完毕并通过 Content Script 提取链接
+ * 在 Tab 内部执行直接 DOM 提取
  */
-function extractLinksFromTab(tabId: number): Promise<string[]> {
-  return new Promise((resolve) => {
-    const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+async function extractShopLinksUsingScripting(tabId: number, shopSlug: string): Promise<string[]> {
+  // 等待 Tab 加载完成
+  await new Promise<void>((resolve) => {
+    const listener = (tid: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+      if (tid === tabId && changeInfo.status === 'complete') {
         chrome.tabs.onUpdated.removeListener(listener);
-
-        setTimeout(() => {
-          chrome.tabs.sendMessage(
-            tabId,
-            { action: 'EXTRACT_SHOP_PRODUCTS', maxScroll: 15 },
-            (response) => {
-              if (chrome.runtime.lastError || !response?.ok) {
-                console.warn('[Background] Content script 提取返回异常:', chrome.runtime.lastError);
-                resolve([]);
-              } else {
-                const links = (response.result?.products || []).map((p: any) => p.href);
-                resolve(links);
-              }
-            }
-          );
-        }, 2000);
+        resolve();
       }
     };
-
     chrome.tabs.onUpdated.addListener(listener);
-
     setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve([]);
-    }, 35000);
+      resolve();
+    }, 15000);
   });
+
+  // 延时 2 秒等待 React/Vue 水合渲染
+  await sleep(2000);
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (slug: string) => {
+        // 尝试点击 "Produk" tab
+        const tabEls = Array.from(document.querySelectorAll<HTMLElement>('a, button, [role="tab"], div[data-testid*="tab"]'));
+        const pTab = tabEls.find((el) => {
+          const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+          return t === 'produk' || t === 'products' || t === 'semua produk';
+        });
+        if (pTab) {
+          pTab.click();
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+
+        const productMap = new Set<string>();
+        const selectors = [
+          `a[href*="/${slug}/"]`,
+          'a[data-testid*="linkProduct"]',
+          'a[data-testid*="product"]',
+          'div[data-testid*="product"] a',
+          'div[class*="pcv3"] a',
+          'div[class*="card"] a'
+        ];
+
+        // 模拟滚动加载
+        for (let i = 0; i < 15; i++) {
+          window.scrollBy(0, 1200);
+          await new Promise((r) => setTimeout(r, 600));
+
+          for (const sel of selectors) {
+            for (const a of Array.from(document.querySelectorAll<HTMLAnchorElement>(sel))) {
+              if (a.href && !a.href.startsWith('javascript:')) {
+                productMap.add(a.href);
+              }
+            }
+          }
+        }
+
+        // 过滤非商品链接
+        return Array.from(productMap).filter((href) => {
+          try {
+            const u = new URL(href);
+            const seg = u.pathname.split('/').filter(Boolean);
+            if (seg.length < 2) return false;
+            const second = seg[1].toLowerCase();
+            return !['product', 'review', 'about', 'policy', 'shipping', 'info', 'feed', 'etalase'].includes(second);
+          } catch {
+            return false;
+          }
+        });
+      },
+      args: [shopSlug],
+    });
+
+    return (results && results[0]?.result) || [];
+  } catch (err) {
+    console.error('[Background] 执行 Scripting 失败:', err);
+    return [];
+  }
 }
 
 function sleep(ms: number): Promise<void> {
