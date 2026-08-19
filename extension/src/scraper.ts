@@ -190,11 +190,90 @@ export function parseProduct(cache: any): ScrapedProduct | null {
   };
 }
 
-/** 抓取单个商品详情 */
+/** 从 HTML 或 URL 参数中兜底解析 OpenGraph / PDP 数据（支持 TikTok Shop / shop-id.tokopedia.com） */
+export function parseFromMetaOrUrl(url: string, html?: string): ScrapedProduct {
+  let name: string | null = null;
+  let imageMain: string | null = null;
+  let productId: string = '';
+  let shopId: string | null = null;
+
+  // 1. 从 URL 提取 ProductID 与 og_info
+  try {
+    const u = new URL(url);
+    const pathParts = u.pathname.split('/').filter(Boolean);
+
+    // 匹配 /view/product/123456 或 /slug-123456
+    const lastSeg = pathParts[pathParts.length - 1] || '';
+    const idMatch = lastSeg.match(/(\d{15,22})/);
+    if (idMatch) {
+      productId = idMatch[1];
+    } else {
+      productId = lastSeg || String(Date.now());
+    }
+
+    if (pathParts.length >= 2 && pathParts[0] !== 'view' && pathParts[0] !== 'pdp') {
+      shopId = pathParts[0];
+    }
+
+    const ogInfoRaw = u.searchParams.get('og_info');
+    if (ogInfoRaw) {
+      const ogInfo = JSON.parse(decodeURIComponent(ogInfoRaw));
+      name = ogInfo.title || null;
+      imageMain = ogInfo.image || null;
+    }
+  } catch {}
+
+  // 2. 如果有 HTML，尝试提取 OpenGraph 标签
+  if (html) {
+    if (!name) {
+      const titleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["'](.*?)["']/i) ||
+                         html.match(/<title>(.*?)<\/title>/i);
+      if (titleMatch) {
+        name = titleMatch[1].replace(/&amp;/g, '&').replace(/&#39;/g, "'").trim();
+      }
+    }
+    if (!imageMain) {
+      const imgMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["'](.*?)["']/i);
+      if (imgMatch) {
+        imageMain = imgMatch[1];
+      }
+    }
+  }
+
+  return {
+    productID: productId,
+    ttsPID: productId,
+    shopID: shopId,
+    shopName: shopId,
+    name: name || `Product ${productId}`,
+    url,
+    imageMain: imageMain,
+    images: imageMain ? [imageMain] : [],
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+/** 抓取单个商品详情（优先 window.__cache，失败则兜底 OpenGraph 解析） */
 export async function scrapeProduct(url: string): Promise<ScrapedProduct> {
-  const html = await fetchHtml(url);
-  const cache = extractCache(html);
-  const p = parseProduct(cache);
-  if (!p) throw new Error('未解析到商品数据（可能触发风控）');
-  return p;
+  let html = '';
+  try {
+    html = await fetchHtml(url);
+  } catch (err) {
+    console.warn(`[Scraper] fetchHtml 异常，使用 URL 降级解析: ${url}`, err);
+    return parseFromMetaOrUrl(url);
+  }
+
+  try {
+    const cache = extractCache(html);
+    const p = parseProduct(cache);
+    if (p && p.productID) return p;
+  } catch (e) {
+    // window.__cache 不存在（如 TikTok Shop / shop-id 视图），使用 Meta / URL 兜底
+  }
+
+  const fallback = parseFromMetaOrUrl(url, html);
+  if (!fallback.productID) {
+    throw new Error('未解析到商品 ID');
+  }
+  return fallback;
 }
