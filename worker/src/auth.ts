@@ -12,10 +12,12 @@ export type AppContext = {
   };
 };
 
+export const DEFAULT_USER = 'admin@default.user';
+
 /**
- * 从 CF Access JWT 或相关 Header 中解析用户 Email
+ * 从 CF Access JWT 或相关 Header 中解析用户 Email，未登录时自动降级到默认公共用户
  */
-export function getUserEmail(req: Request): string | null {
+export function getUserEmail(req: Request): string {
   // 1. 尝试从 Cloudflare Access 注入的 Cf-Access-Jwt-Assertion 读取
   const jwt = req.headers.get('Cf-Access-Jwt-Assertion');
   if (jwt) {
@@ -45,29 +47,17 @@ export function getUserEmail(req: Request): string | null {
   const devEmail = req.headers.get('x-user-email');
   if (devEmail) return devEmail;
 
-  // 4. 本地开发模式 (localhost / 127.0.0.1) 兜底默认用户
-  try {
-    const url = new URL(req.url);
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-      return 'dev-admin@local';
-    }
-  } catch {
-    // ignore URL parse errors
-  }
-
-  return null;
+  // 4. 免登录模式：自动兜底为默认管理账号
+  return DEFAULT_USER;
 }
 
 /**
- * Hono 认证中间件：确保用户已登录并将 email 注入上下文
+ * Hono 认证中间件：注入当前用户（未配置 Access 时自动使用默认用户）
  */
 export async function authMiddleware(c: Context<AppContext>, next: Next) {
   const email = getUserEmail(c.req.raw);
-  if (!email) {
-    return c.json({ error: '未认证，请先通过 Cloudflare Access 登录' }, 401);
-  }
 
-  // 确保用户记录存在
+  // 确保用户记录存在于 users 表中
   try {
     await c.env.DB.prepare(
       'INSERT INTO users (email) VALUES (?) ON CONFLICT(email) DO NOTHING'
